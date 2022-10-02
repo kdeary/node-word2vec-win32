@@ -1,0 +1,36 @@
+.DS_Store
+
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.co
+*.obj
+*.iobj
+*.ipdb
+*.pdb
+
+# Visual Studio
+*sdf
+*.suo
+*.ncb
+*.user
+Debug
+Release
+
+*.exe
+text8
+text8-phrase
+vectors.bin
+vectors-phrase.bin
+classes.txt
+classes.sorted.txt
+
+compute-accuracy
+distance
+word-analogy
+word2phrase
+word2vec
+word2vec-blas
+word2vec-doc2vec
+*.opendb

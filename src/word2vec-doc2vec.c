@@ -23,19 +23,6 @@
 #include <pthread.h>
 #endif
 
-#if HAVE_CBLAS == 1
-// CBLAS declaration
-extern void cblas_scopy(const int n, const float *x, const int incx, float *y,
-                        const int incy);
-extern void cblas_saxpy(const int n, const float alpha, const float *x,
-                        const int incx, float *y, const int incy);
-extern float cblas_sdot(const int n, const float *x, const int incx,
-                        const float *y, const int incy);
-extern void cblas_sscal(const int n, const float alpha, float *x,
-                        const int incx);
-static const float zero = 0;
-#endif
-
 #define MAX_STRING 100
 #define EXP_TABLE_SIZE 1000
 #define MAX_EXP 6
@@ -60,6 +47,7 @@ int binary = 0, cbow = 1, debug_mode = 2, window = 5, min_count = 5,
     num_threads = 12, min_reduce = 1;
 int *vocab_hash;
 long long vocab_max_size = 1000, vocab_size = 0, layer1_size = 100;
+long long sentence_vectors = 0;
 long long train_words = 0, word_count_actual = 0, iter = 5, file_size = 0,
           classes = 0;
 real alpha = 0.025, starting_alpha, sample = 1e-3;
@@ -385,11 +373,7 @@ void InitNet() {
       exit(1);
     }
     for (a = 0; a < vocab_size; a++)
-#if HAVE_CBLAS == 1
-      cblas_scopy(layer1_size, &zero, 1, syn1 + a * layer1_size, 1);
-#else
       for (b = 0; b < layer1_size; b++) syn1[a * layer1_size + b] = 0;
-#endif
   }
   if (negative > 0) {
     a = posix_memalign((void **)&syn1neg, 128,
@@ -399,11 +383,7 @@ void InitNet() {
       exit(1);
     }
     for (a = 0; a < vocab_size; a++)
-#if HAVE_CBLAS == 1
-      cblas_scopy(layer1_size, &zero, 0, syn1neg + a * layer1_size, 1);
-#else
       for (b = 0; b < layer1_size; b++) syn1neg[a * layer1_size + b] = 0;
-#endif
   }
   for (a = 0; a < vocab_size; a++)
     for (b = 0; b < layer1_size; b++) {
@@ -475,51 +455,40 @@ void *TrainModelThread(void *id) {
     }
     word = sen[sentence_position];
     if (word == -1) continue;
-#if HAVE_CBLAS == 1
-    cblas_scopy(layer1_size, &zero, 0, neu1, 1);
-    cblas_scopy(layer1_size, &zero, 0, neu1e, 1);
-#else
     for (c = 0; c < layer1_size; c++) neu1[c] = 0;
     for (c = 0; c < layer1_size; c++) neu1e[c] = 0;
-#endif
     next_random = next_random * (unsigned long long)25214903917 + 11;
     b = next_random % window;
     if (cbow) {  // train the cbow architecture
       // in -> hidden
       cw = 0;
-      for (a = b; a < window * 2 + 1 - b; a++)
+      for (a = b; a < window * 1 + 1 - b; a++)
         if (a != window) {
           c = sentence_position - window + a;
           if (c < 0) continue;
           if (c >= sentence_length) continue;
+          if (sentence_vectors && (c == 0)) continue;
           last_word = sen[c];
           if (last_word == -1) continue;
-#if HAVE_CBLAS == 1
-          cblas_saxpy(layer1_size, 1.0f, syn0 + last_word * layer1_size, 1,
-                      neu1, 1);
-#else
           for (c = 0; c < layer1_size; c++)
             neu1[c] += syn0[c + last_word * layer1_size];
-#endif
           cw++;
         }
+      if (sentence_vectors) {
+        last_word = sen[0];
+        if (last_word == -1) continue;
+        for (c = 0; c < layer1_size; c++)
+          neu1[c] += syn0[c + last_word * layer1_size];
+        cw++;
+      }
       if (cw) {
-#if HAVE_CBLAS == 1
-        cblas_sscal(layer1_size, 1.0f / cw, neu1, 1);
-#else
         for (c = 0; c < layer1_size; c++) neu1[c] /= cw;
-#endif
         if (hs)
           for (d = 0; d < vocab[word].codelen; d++) {
-            l2 = vocab[word].point[d] * layer1_size;
-#if HAVE_CBLAS == 1
-            // Propagate hidden -> output
-            f = cblas_sdot(layer1_size, neu1, 1, syn1 + l2, 1);
-#else
-            // Propagate hidden -> output
             f = 0;
+            l2 = vocab[word].point[d] * layer1_size;
+            // Propagate hidden -> output
             for (c = 0; c < layer1_size; c++) f += neu1[c] * syn1[c + l2];
-#endif
             if (f <= -MAX_EXP)
               continue;
             else if (f >= MAX_EXP)
@@ -529,17 +498,10 @@ void *TrainModelThread(void *id) {
                                  (EXP_TABLE_SIZE / MAX_EXP / 2))];
             // 'g' is the gradient multiplied by the learning rate
             g = (1 - vocab[word].code[d] - f) * alpha;
-#if HAVE_CBLAS == 1
-            // Propagate errors output -> hidden
-            cblas_saxpy(layer1_size, g, syn1 + l2, 1, neu1e, 1);
-            // Learn weights hidden -> output
-            cblas_saxpy(layer1_size, g, neu1, 1, syn1 + l2, 1);
-#else
             // Propagate errors output -> hidden
             for (c = 0; c < layer1_size; c++) neu1e[c] += g * syn1[c + l2];
             // Learn weights hidden -> output
             for (c = 0; c < layer1_size; c++) syn1[c + l2] += g * neu1[c];
-#endif
           }
         // NEGATIVE SAMPLING
         if (negative > 0)
@@ -554,12 +516,8 @@ void *TrainModelThread(void *id) {
               label = 0;
             }
             l2 = target * layer1_size;
-#if HAVE_CBLAS == 1
-            f = cblas_sdot(layer1_size, neu1, 1, syn1neg + l2, 1);
-#else
             f = 0;
             for (c = 0; c < layer1_size; c++) f += neu1[c] * syn1neg[c + l2];
-#endif
             if (f > MAX_EXP)
               g = (label - 1) * alpha;
             else if (f < -MAX_EXP)
@@ -568,58 +526,48 @@ void *TrainModelThread(void *id) {
               g = (label - expTable[(int)((f + MAX_EXP) *
                                           (EXP_TABLE_SIZE / MAX_EXP / 2))]) *
                   alpha;
-#if HAVE_CBLAS == 1
-            cblas_saxpy(layer1_size, g, syn1neg + l2, 1, neu1e, 1);
-            cblas_saxpy(layer1_size, g, neu1, 1, syn1neg + l2, 1);
-#else
             for (c = 0; c < layer1_size; c++) neu1e[c] += g * syn1neg[c + l2];
             for (c = 0; c < layer1_size; c++) syn1neg[c + l2] += g * neu1[c];
-#endif
           }
         // hidden -> in
-        for (a = b; a < window * 2 + 1 - b; a++)
+        for (a = b; a < window * 1 + 1 - b; a++)
           if (a != window) {
             c = sentence_position - window + a;
             if (c < 0) continue;
             if (c >= sentence_length) continue;
+            if (sentence_vectors && (c == 0)) continue;
             last_word = sen[c];
             if (last_word == -1) continue;
-#if HAVE_CBLAS == 1
-            cblas_saxpy(layer1_size, 1, neu1e, 1,
-                        syn0 + last_word * layer1_size, 1);
-#else
             for (c = 0; c < layer1_size; c++)
               syn0[c + last_word * layer1_size] += neu1e[c];
-#endif
           }
+        if (sentence_vectors) {
+          last_word = sen[0];
+          if (last_word == -1) continue;
+          for (c = 0; c < layer1_size; c++)
+            syn0[c + last_word * layer1_size] += neu1e[c];
+        }
       }
     } else {  // train skip-gram
-      for (a = b; a < window * 2 + 1 - b; a++)
+      for (a = b; a < window * 2 + 1 + sentence_vectors - b; a++)
         if (a != window) {
           c = sentence_position - window + a;
+          if (sentence_vectors)
+            if (a >= window * 2 + sentence_vectors - b) c = 0;
           if (c < 0) continue;
           if (c >= sentence_length) continue;
           last_word = sen[c];
           if (last_word == -1) continue;
           l1 = last_word * layer1_size;
-#if HAVE_CBLAS == 1
-          cblas_scopy(layer1_size, &zero, 0, neu1e, 1);
-#else
           for (c = 0; c < layer1_size; c++) neu1e[c] = 0;
-#endif
           // HIERARCHICAL SOFTMAX
           if (hs)
             for (d = 0; d < vocab[word].codelen; d++) {
-              l2 = vocab[word].point[d] * layer1_size;
-#if HAVE_CBLAS == 1
-              // Propagate hidden -> output
-              f = cblas_sdot(layer1_size, syn0 + l1, 1, syn1 + l2, 1);
-#else
-              // Propagate hidden -> output
               f = 0;
+              l2 = vocab[word].point[d] * layer1_size;
+              // Propagate hidden -> output
               for (c = 0; c < layer1_size; c++)
                 f += syn0[c + l1] * syn1[c + l2];
-#endif
               if (f <= -MAX_EXP)
                 continue;
               else if (f >= MAX_EXP)
@@ -629,18 +577,11 @@ void *TrainModelThread(void *id) {
                                    (EXP_TABLE_SIZE / MAX_EXP / 2))];
               // 'g' is the gradient multiplied by the learning rate
               g = (1 - vocab[word].code[d] - f) * alpha;
-#if HAVE_CBLAS == 1
-              // Propagate errors output -> hidden
-              cblas_saxpy(layer1_size, g, syn1 + l2, 1, neu1e, 1);
-              // Learn weights hidden -> output
-              cblas_saxpy(layer1_size, g, syn0 + l1, 1, syn1 + l2, 1);
-#else
               // Propagate errors output -> hidden
               for (c = 0; c < layer1_size; c++) neu1e[c] += g * syn1[c + l2];
               // Learn weights hidden -> output
               for (c = 0; c < layer1_size; c++)
                 syn1[c + l2] += g * syn0[c + l1];
-#endif
             }
           // NEGATIVE SAMPLING
           if (negative > 0)
@@ -656,13 +597,9 @@ void *TrainModelThread(void *id) {
                 label = 0;
               }
               l2 = target * layer1_size;
-#if HAVE_CBLAS == 1
-              f = cblas_sdot(layer1_size, syn0 + l1, 1, syn1neg + l2, 1);
-#else
               f = 0;
               for (c = 0; c < layer1_size; c++)
                 f += syn0[c + l1] * syn1neg[c + l2];
-#endif
               if (f > MAX_EXP)
                 g = (label - 1) * alpha;
               else if (f < -MAX_EXP)
@@ -671,22 +608,12 @@ void *TrainModelThread(void *id) {
                 g = (label - expTable[(int)((f + MAX_EXP) *
                                             (EXP_TABLE_SIZE / MAX_EXP / 2))]) *
                     alpha;
-#if HAVE_CBLAS == 1
-              cblas_saxpy(layer1_size, g, syn1neg + l2, 1, neu1e, 1);
-              cblas_saxpy(layer1_size, g, syn0 + l1, 1, syn1neg + l2, 1);
-#else
               for (c = 0; c < layer1_size; c++) neu1e[c] += g * syn1neg[c + l2];
               for (c = 0; c < layer1_size; c++)
                 syn1neg[c + l2] += g * syn0[c + l1];
-#endif
             }
-#if HAVE_CBLAS == 1
-          // Learn weights input -> hidden
-          cblas_saxpy(layer1_size, 1, neu1e, 1, syn0 + l1, 1);
-#else
           // Learn weights input -> hidden
           for (c = 0; c < layer1_size; c++) syn0[c + l1] += neu1e[c];
-#endif
         }
     }
     sentence_position++;
@@ -856,6 +783,13 @@ int main(int argc, char **argv) {
     printf(
         "\t\tUse the continuous bag of words model; default is 1 (use 0 for "
         "skip-gram model)\n");
+    printf("\t-sentence-vectors <int>\n");
+    printf(
+        "\t\tAssume the first token at the beginning of each line is a "
+        "sentence ID. This token will be trained\n");
+    printf(
+        "\t\twith full sentence context instead of just the window. Use 1 to "
+        "turn on.\n");
     printf("\nExamples:\n");
     printf(
         "./word2vec -train data.txt -output vec.txt -size 200 -window 5 "
@@ -896,6 +830,8 @@ int main(int argc, char **argv) {
     min_count = atoi(argv[i + 1]);
   if ((i = ArgPos((char *)"-classes", argc, argv)) > 0)
     classes = atoi(argv[i + 1]);
+  if ((i = ArgPos((char *)"-sentence-vectors", argc, argv)) > 0)
+    sentence_vectors = atoi(argv[i + 1]);
   vocab =
       (struct vocab_word *)calloc(vocab_max_size, sizeof(struct vocab_word));
   vocab_hash = (int *)calloc(vocab_hash_size, sizeof(int));
