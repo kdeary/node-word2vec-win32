@@ -1,3 +1,10 @@
+node-word2vec-win32
+=============
+
+This is a version of `node-word2vec` made to work with win32 machines.
+
+---
+
 [![NPM version][npm-image]][npm-url]
 [![Build Status][travis-image]][travis-url]
 [![Coverage Status][codecov-image]][codecov-url]
